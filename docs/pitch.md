@@ -10,7 +10,5 @@ what we have used:
 
 2) Composio to connect via mcp of all GTM tools - Slack, Linkedin, X, etc.
 
-
-
-
-
+3) web.cmd integration: 
+Webcmd gives our agents a memory for the web — instead of re-navigating every site from scratch each run, they learn it once and then act on it instantly, turning slow, expensive browsing into fast, reliable, one-line commands across every app our GTM agents touch.
