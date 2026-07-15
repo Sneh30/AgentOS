@@ -1,0 +1,9 @@
+{
+  "name": "claude-gtm",
+  "description": "ClaudeGTM — a library of GTM/sales skills (org charts, pre-call briefs, meeting follow-ups, lead triage, trigger outreach, list building, and more), powered by Crustdata and your own composable stack.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Crustdata"
+  },
+  "keywords": ["sales", "gtm", "prospecting", "crustdata", "crm", "outbound", "revenue"]
+}
