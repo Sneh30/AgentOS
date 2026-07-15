@@ -94,6 +94,20 @@ const TEMPLATES = [
     source: 'template',
   },
   {
+    name: 'LinkedIn Mention Finder',
+    description: 'Find LinkedIn posts mentioning your product — structured search via webcmd, not a browser-agent loop.',
+    goal_template: 'Find LinkedIn posts mentioning {product_name} from the last {lookback_days} days.',
+    toolkits: ['webcmd:linkedin'],
+    input_schema: {
+      product_name: { type: 'string', description: 'Product or brand to search for' },
+      lookback_days: { type: 'number', description: 'How many days back to search', optional: true },
+    },
+    trigger: 'schedule',
+    schedule: '0 9 * * *',
+    status: 'active',
+    source: 'template',
+  },
+  {
     name: 'Lead Enricher',
     description: 'Enrich a list of leads with verified emails and firmographic data.',
     goal_template: 'Enrich these leads with verified email addresses and company data, then log them to the CRM: {lead_list}.',

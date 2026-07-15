@@ -41,6 +41,23 @@ export function formatStepResult(tool: string, result: any): string {
     : result;
 
   const toolLower = tool.toLowerCase();
+
+  if (toolLower.startsWith('webcmd:linkedin:search')) {
+    const items = Array.isArray(data) ? data : data.results || [];
+    if (items.length === 0) return 'No LinkedIn results found.';
+    return `Found ${items.length} LinkedIn result${items.length > 1 ? 's' : ''}:\n${items
+      .map((r: any, i: number) => `${i + 1}. ${r.title || r.author || 'Untitled'} — ${r.url || ''}\n   ${(r.snippet || r.text || '').slice(0, 160)}`)
+      .join('\n')}`;
+  }
+
+  if (toolLower.startsWith('webcmd:linkedin:posts')) {
+    const items = Array.isArray(data) ? data : data.posts || [];
+    if (items.length === 0) return 'No LinkedIn posts found.';
+    return `Found ${items.length} LinkedIn post${items.length > 1 ? 's' : ''}:\n${items
+      .map((p: any, i: number) => `${i + 1}. ${(p.text || p.content || '').slice(0, 160)} (${p.date || p.postedAt || 'recent'})`)
+      .join('\n')}`;
+  }
+
   if (toolLower.includes('gmail_fetch') || toolLower.includes('gmail_list')) {
     const messages = data.messages || (Array.isArray(data) ? data : []);
     if (messages.length === 0) return 'No emails found.';
@@ -318,7 +335,7 @@ export async function executeTask(
     const composioUserId = internalUserId;
     console.log(`[Executor] Using composioUserId: ${composioUserId} for Composio tools`);
 
-    const BUILT_IN_TOOLS = ['memory_store', 'memory_recall', 'http_request', 'email_send', 'browser_search', 'browser_scrape'];
+    const BUILT_IN_TOOLS = ['memory_store', 'memory_recall', 'http_request', 'email_send', 'browser_search', 'browser_scrape', 'webcmd:linkedin:search', 'webcmd:linkedin:posts'];
 
     const MAX_ITERATIONS = 3; // Reduced from 4 - most tasks complete in 2-3 iterations
     let iterations = 0;

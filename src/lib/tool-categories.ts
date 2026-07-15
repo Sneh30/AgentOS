@@ -8,6 +8,7 @@ export type ToolCategory =
   | 'mcp'        // MCP server tools - ask permission
   | 'composio'   // Composio meta-tools - policy-based
   | 'browser'    // Firecrawl-backed web search/scrape - always allowed
+  | 'webcmd'     // webcmd-backed authenticated site access - opt-in per agent, never a default
   | 'critical'; // Dangerous operations - YOLO only
 
 export interface ToolCapability {
@@ -46,6 +47,8 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   'http_request': 'read',
   'browser_search': 'browser',
   'browser_scrape': 'browser',
+  'webcmd:linkedin:search': 'webcmd',
+  'webcmd:linkedin:posts': 'webcmd',
 
   // Write tools - ask permission
   'email_send': 'write',

@@ -2,8 +2,9 @@ import { z } from 'zod';
 import type { ToolDefinition, ToolExecution } from '@/types/database';
 import { getToolCategory, isComposioToolName, DEFAULT_POLICY, type CapabilityPolicy, type ToolCategory } from './tool-categories';
 import { searchTools, executeComposioToolCall, createComposioMetaTools } from './composio/index';
-import { isGtmToolkit } from './gtm-toolkits';
+import { isGtmToolkit, webcmdSiteOf } from './gtm-toolkits';
 import { browserSearch, browserScrape } from './browser';
+import { webcmdLinkedinSearch, webcmdLinkedinPosts } from './webcmd';
 
 export interface ToolResult {
   success: boolean;
@@ -228,6 +229,14 @@ function isToolAllowed(name: string, policy?: CapabilityPolicy): boolean {
     return policy.allowedToolkits.some((tk) => tk.toLowerCase() === prefix);
   }
 
+  // webcmd tools (webcmd:linkedin:search, ...) — opt-in only. Unlike browser_search/scrape
+  // these drive an authenticated local browser profile, so a run only gets them when its
+  // agent explicitly listed the webcmd site in its toolkits (never a DEFAULT_POLICY default).
+  if (category === 'webcmd') {
+    if (!policy.allowedToolkits) return false;
+    return policy.allowedToolkits.some((tk) => tk.toLowerCase() === webcmdSiteOf(name));
+  }
+
   // Critical tools
   if (category === 'critical') return false;
 
@@ -428,6 +437,45 @@ export class BrowserScrapeTool implements BaseTool {
   }
 }
 
+// webcmd — thin first slice (see docs/webcmd.md). Hardcoded like browser_search/scrape
+// rather than dynamically registered from `webcmd list -f json`; only reachable when an
+// agent's toolkits explicitly include 'webcmd:linkedin' (see isToolAllowed above).
+const webcmdLinkedinSearchSchema = z.object({
+  query: z.string().describe('Search query, e.g. a product or company name to find mentions of'),
+});
+
+export class WebcmdLinkedinSearchTool implements BaseTool {
+  name = 'webcmd:linkedin:search';
+  description = 'Search LinkedIn via an authenticated local browser profile (webcmd) — structured results, no scraping/parsing needed';
+  category: ToolCategory = 'webcmd';
+  inputSchema = webcmdLinkedinSearchSchema;
+
+  async execute(input: Record<string, unknown>): Promise<ToolResult> {
+    const { query } = input as z.infer<typeof webcmdLinkedinSearchSchema>;
+    const result = await webcmdLinkedinSearch(query);
+    if (!result.success) return { success: false, error: result.error };
+    return { success: true, data: result.data };
+  }
+}
+
+const webcmdLinkedinPostsSchema = z.object({
+  profileOrCompany: z.string().describe('LinkedIn profile handle or company name to fetch recent posts from'),
+});
+
+export class WebcmdLinkedinPostsTool implements BaseTool {
+  name = 'webcmd:linkedin:posts';
+  description = 'Fetch recent LinkedIn posts from a profile or company page via webcmd — structured results, no scraping/parsing needed';
+  category: ToolCategory = 'webcmd';
+  inputSchema = webcmdLinkedinPostsSchema;
+
+  async execute(input: Record<string, unknown>): Promise<ToolResult> {
+    const { profileOrCompany } = input as z.infer<typeof webcmdLinkedinPostsSchema>;
+    const result = await webcmdLinkedinPosts(profileOrCompany);
+    if (!result.success) return { success: false, error: result.error };
+    return { success: true, data: result.data };
+  }
+}
+
 const httpRequestSchema = z.object({
   url: z.string().url().describe('HTTP URL to request'),
   method: z.enum(['GET', 'POST', 'PUT', 'DELETE', 'PATCH']).optional().default('GET'),
@@ -600,6 +648,8 @@ export function initializeTools(): void {
     registerTool(new EmailSendTool());
     registerTool(new BrowserSearchTool());
     registerTool(new BrowserScrapeTool());
+    registerTool(new WebcmdLinkedinSearchTool());
+    registerTool(new WebcmdLinkedinPostsTool());
     builtInsRegistered = true;
 
     console.log(`[Tools] Initialized ${toolRegistry.size} tools`);
