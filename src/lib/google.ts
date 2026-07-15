@@ -178,7 +178,7 @@ export async function generatePlan(
 
   const customTools = availableTools.filter((t) => !t.name.startsWith('composio_'));
   const toolsSection = customTools.length > 0
-    ? `\n\nCustom tools (built-in or built via Agent Foundry — call these directly by name with the input shape shown, no auth needed):\n${customTools
+    ? `\n\nBuilt-in tools (call these directly by name with the input shape shown, no auth needed):\n${customTools
         .map((t) => `- ${t.name}: ${t.description}${t.input_schema ? ` Input: ${JSON.stringify(t.input_schema)}` : ''}`)
         .join('\n')}`
     : '';
@@ -373,65 +373,49 @@ RULES:
   }
 }
 
-export interface ToolPlan {
+export interface AgentDefinitionPlan {
   name: string;
   description: string;
-  category: 'read' | 'write' | 'delete' | 'execute' | 'critical';
-  inputSchema: Record<string, unknown>;
-  exampleInput: Record<string, unknown>;
-  reasoning: string;
-  composesWith?: string[];
+  goalTemplate: string;
+  toolkits: string[];
+  inputSchema: Record<string, { type: string; description?: string; optional?: boolean }>;
+  suggestedTrigger: 'manual' | 'schedule' | 'webhook';
+  suggestedSchedule?: string;
 }
 
-export interface ExistingTool {
-  name: string;
-  description: string;
-  input_schema?: Record<string, unknown>;
-}
-
-function formatExistingTools(existingTools: ExistingTool[]): string {
-  if (existingTools.length === 0) return '';
-  return `\n\nEXISTING TOOLS already registered on this platform (you can compose with these instead of reimplementing their logic):\n${existingTools
-    .map((t) => `- ${t.name}: ${t.description}${t.input_schema ? ` Input: ${JSON.stringify(t.input_schema)}` : ''}`)
-    .join('\n')}`;
-}
-
-export async function planToolCapability(
+// Turns a plain-English ask ("find LinkedIn posts mentioning our product") into a
+// declarative gtm_agents row: goal template, required toolkits, input schema, suggested
+// trigger. No code is generated — only a JSON config the executor already knows how to run.
+export async function generateAgentDefinition(
   description: string,
-  existingTools: ExistingTool[] = []
-): Promise<{ plan: ToolPlan } | { error: string }> {
+  allowedToolkits: string[]
+): Promise<{ plan: AgentDefinitionPlan } | { error: string }> {
   if (!GOOGLE_API_KEY) {
     return { error: 'GOOGLE_API_KEY not configured' };
   }
 
-  const systemPrompt = `You are a software architect for an AI agent platform. Given a plain-language description of a capability, design a plan for a single tool that implements it.
+  const systemPrompt = `You design reusable GTM agent definitions for a GTM automation platform. Given a plain-language description of a workflow, design a declarative agent — NOT code.
 
 Return ONLY valid JSON, no markdown fences, no explanation:
 {
-  "name": "snake_case_tool_name",
-  "description": "one sentence describing what the tool does",
-  "category": "read|write|delete|execute|critical",
-  "inputSchema": { "fieldName": { "type": "string|number|boolean", "description": "...", "optional": false } },
-  "exampleInput": { "fieldName": "a realistic example value" },
-  "reasoning": "1-2 sentences on requirements and approach",
-  "composesWith": ["existing_tool_name"]
+  "name": "Short Title Case Name",
+  "description": "one sentence describing what this agent does",
+  "goalTemplate": "an instruction for the task planner, with {variable} placeholders for each input, e.g. 'Find LinkedIn posts mentioning {product_name} in the last {lookback_days} days'",
+  "toolkits": ["toolkit_slug", ...],
+  "inputSchema": { "field_name": { "type": "string|number|boolean", "description": "...", "optional": false } },
+  "suggestedTrigger": "manual|schedule|webhook",
+  "suggestedSchedule": "cron expression, only if suggestedTrigger is schedule, e.g. '0 9 * * *' for daily 9am"
 }
 
-Category guide:
-- read: fetches/looks up data, no side effects
-- write: creates or modifies something
-- delete: removes something
-- execute: runs a computation or command
-- critical: irreversible or high-risk operations (avoid unless truly necessary)
+ALLOWED TOOLKITS (only ever list slugs from this set — the agent can also always use browser_search/browser_scrape and memory, those are implicit and should NOT be listed in "toolkits"):
+${allowedToolkits.join(', ')}
 
-Keep the tool narrowly scoped to exactly what was asked. Prefer "execute" for pure computations (string/data transforms) that have no external side effects.
-
-"composesWith" is an empty array unless one of the EXISTING TOOLS below would genuinely help — if this capability needs something an existing tool already does (e.g. this is "plan a trip" and an existing tool already fetches weather), list that tool's exact name there and mention the composition in "reasoning". Never list a tool that isn't in the EXISTING TOOLS section.${formatExistingTools(existingTools)}`;
+Keep the agent narrowly scoped to exactly what was asked. Prefer "manual" trigger unless the description implies recurring monitoring (e.g. "daily", "watch for", "alert me when").`;
 
   const result = await callGoogle(
     [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Design a tool for this capability:\n\n"${description}"` },
+      { role: 'user', content: `Design a GTM agent for this workflow:\n\n"${description}"` },
     ],
     { temperature: 0.2, maxOutputTokens: 1024 }
   );
@@ -441,129 +425,13 @@ Keep the tool narrowly scoped to exactly what was asked. Prefer "execute" for pu
   }
 
   try {
-    const plan = extractJSON<ToolPlan>(result.content);
-    if (!plan.name || !plan.description || !plan.category) {
-      return { error: `Invalid tool plan: ${JSON.stringify(plan).substring(0, 200)}` };
+    const plan = extractJSON<AgentDefinitionPlan>(result.content);
+    if (!plan.name || !plan.goalTemplate) {
+      return { error: `Invalid agent definition: ${JSON.stringify(plan).substring(0, 200)}` };
     }
     return { plan };
   } catch (e) {
-    return { error: `Failed to parse tool plan: ${e instanceof Error ? e.message : 'Unknown error'}` };
-  }
-}
-
-function buildToolCodegenContract(existingTools: ExistingTool[]): string {
-  return `Generate ONE file implementing this exact interface (already defined elsewhere — do not redeclare it, import it):
-
-\`\`\`ts
-import type { ToolCategory } from '../../tool-categories';
-import type { BaseTool, ToolResult } from '../../tools-enhanced';
-\`\`\`
-
-interface BaseTool {
-  name: string;
-  description: string;
-  category: ToolCategory;
-  inputSchema: z.ZodSchema; // from the 'zod' package
-  execute(input: Record<string, unknown>, userId: string): Promise<ToolResult>;
-}
-
-interface ToolResult {
-  success: boolean;
-  data?: unknown;
-  error?: string;
-  toolName?: string;
-  durationMs?: number;
-}
-
-STRICT RULES:
-- Only import from: 'zod', '../../tool-categories' (type ToolCategory), '../../tools-enhanced' (type BaseTool, type ToolResult, and — only if needed — the functions isValidUrl and callTool).
-- If the tool calls fetch(), you MUST call isValidUrl(url) first and return { success: false, error: 'Invalid or unsafe URL' } if it returns false.
-- To use another already-registered tool instead of reimplementing its logic, call \`await callTool(toolName, input, userId)\` (imported from '../../tools-enhanced', same place as isValidUrl) — it returns a ToolResult. Only call tool names listed in EXISTING TOOLS below; never invent one. Always forward the \`userId\` parameter your own execute() received.
-- No other imports. No 'fs', 'child_process', 'net', 'http', 'https', 'eval', 'new Function', 'process.exit', dynamic 'import(', or 'require('.
-- The file's default export must be a ready-to-use instance: \`export default new ClassName();\` (not the class itself).
-- execute() must never throw — catch errors internally and return { success: false, error }.
-- Measure durationMs with Date.now() around the work and include it in every returned ToolResult.
-- Keep the implementation as short as correctness allows.
-
-Return ONLY valid JSON (no markdown fences) in this exact envelope, with the full file source as a properly JSON-escaped string:
-{
-  "code": "the complete file source as one string, with \\n for newlines",
-  "dependencies": []
-}
-
-"dependencies" lists any npm package names beyond 'zod' the code needs (usually empty — prefer zero new dependencies; built-in Node/Web APIs like fetch, JSON, Math, String, Array are always available and are not "dependencies").${formatExistingTools(existingTools)}`;
-}
-
-export async function generateToolCode(
-  plan: ToolPlan,
-  existingTools: ExistingTool[] = []
-): Promise<{ code: string; dependencies: string[] } | { error: string }> {
-  if (!GOOGLE_API_KEY) {
-    return { error: 'GOOGLE_API_KEY not configured' };
-  }
-
-  const systemPrompt = `You write TypeScript tool modules for an AI agent platform's runtime. ${buildToolCodegenContract(existingTools)}`;
-  const userMessage = `Tool plan:\n${JSON.stringify(plan, null, 2)}\n\nGenerate the file now.${
-    plan.composesWith?.length ? `\n\nThis plan calls for composing with: ${plan.composesWith.join(', ')} — use callTool() for those instead of reimplementing them.` : ''
-  }`;
-
-  const result = await callGoogle(
-    [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userMessage },
-    ],
-    { temperature: 0.2, maxOutputTokens: 4096 }
-  );
-
-  if ('error' in result) {
-    return { error: result.error };
-  }
-
-  try {
-    const parsed = extractJSON<{ code: string; dependencies?: string[] }>(result.content);
-    if (!parsed.code || typeof parsed.code !== 'string') {
-      return { error: `Invalid codegen response: ${JSON.stringify(parsed).substring(0, 200)}` };
-    }
-    return { code: parsed.code, dependencies: parsed.dependencies || [] };
-  } catch (e) {
-    return { error: `Failed to parse generated code: ${e instanceof Error ? e.message : 'Unknown error'}` };
-  }
-}
-
-export async function fixToolCode(
-  plan: ToolPlan,
-  previousCode: string,
-  issues: string[],
-  existingTools: ExistingTool[] = []
-): Promise<{ code: string; dependencies: string[] } | { error: string }> {
-  if (!GOOGLE_API_KEY) {
-    return { error: 'GOOGLE_API_KEY not configured' };
-  }
-
-  const systemPrompt = `You previously wrote a TypeScript tool module for an AI agent platform's runtime, but it failed validation. Fix it while keeping the same contract. ${buildToolCodegenContract(existingTools)}`;
-
-  const userMessage = `Tool plan:\n${JSON.stringify(plan, null, 2)}\n\nPrevious code:\n${previousCode}\n\nIssues that MUST be fixed:\n${issues.map((i) => `- ${i}`).join('\n')}\n\nFix the code now. Keep everything that already works; only change what's needed to resolve the issues above.`;
-
-  const result = await callGoogle(
-    [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userMessage },
-    ],
-    { temperature: 0.2, maxOutputTokens: 4096 }
-  );
-
-  if ('error' in result) {
-    return { error: result.error };
-  }
-
-  try {
-    const parsed = extractJSON<{ code: string; dependencies?: string[] }>(result.content);
-    if (!parsed.code || typeof parsed.code !== 'string') {
-      return { error: `Invalid fix response: ${JSON.stringify(parsed).substring(0, 200)}` };
-    }
-    return { code: parsed.code, dependencies: parsed.dependencies || [] };
-  } catch (e) {
-    return { error: `Failed to parse fixed code: ${e instanceof Error ? e.message : 'Unknown error'}` };
+    return { error: `Failed to parse agent definition: ${e instanceof Error ? e.message : 'Unknown error'}` };
   }
 }
 

@@ -27,6 +27,8 @@ import {
   isHydraConfigured,
 } from './hydra';
 import { executeComposioToolCall, searchTools } from './composio/index';
+import { isGtmToolkit } from './gtm-toolkits';
+import { getGtmAgent } from './agents/definitions';
 
 initializeTools();
 
@@ -269,10 +271,15 @@ export interface ExecuteTaskOutput {
 
 export async function createAndExecuteTask(
   input: string,
-  internalUserId: string
+  internalUserId: string,
+  agentId?: string
 ): Promise<ExecuteTaskOutput> {
   const title = input.substring(0, 100) + (input.length > 100 ? '...' : '');
   const task = await createTask(internalUserId, input, title);
+  if (agentId) {
+    await updateTask(task.id, { agent_id: agentId });
+    task.agent_id = agentId;
+  }
   return executeTask(task);
 }
 
@@ -281,7 +288,13 @@ export async function executeTask(
 ): Promise<ExecuteTaskOutput> {
   const { input, user_id: internalUserId } = task;
   console.log('[Executor] Executing task:', input, 'for user:', internalUserId);
-  
+
+  // A saved GTM agent run is scoped to that agent's toolkits — the planner never even
+  // sees toolkits the agent wasn't scoped to (see tools-enhanced.ts composio_search_tools).
+  const policy: CapabilityPolicy = task.agent_id
+    ? { ...DEFAULT_POLICY, allowedToolkits: (await getGtmAgent(task.agent_id))?.toolkits }
+    : DEFAULT_POLICY;
+
   try {
     await updateTask(task.id, { status: 'running' });
 
@@ -305,7 +318,7 @@ export async function executeTask(
     const composioUserId = internalUserId;
     console.log(`[Executor] Using composioUserId: ${composioUserId} for Composio tools`);
 
-    const BUILT_IN_TOOLS = ['memory_store', 'memory_recall', 'http_request', 'github_create_issue', 'github_get_issues', 'email_send', 'twitter_post'];
+    const BUILT_IN_TOOLS = ['memory_store', 'memory_recall', 'http_request', 'email_send', 'browser_search', 'browser_scrape'];
 
     const MAX_ITERATIONS = 3; // Reduced from 4 - most tasks complete in 2-3 iterations
     let iterations = 0;
@@ -319,7 +332,7 @@ export async function executeTask(
       iterations++;
       console.log(`[Executor] Loop iteration ${iterations}/${MAX_ITERATIONS}`);
 
-      const planResult = await generatePlan(input, memoryContext, executionHistory, getRegisteredTools());
+      const planResult = await generatePlan(input, memoryContext, executionHistory, getRegisteredTools(policy));
       
       if ('error' in planResult) {
         if (iterations === 1) {
@@ -356,9 +369,16 @@ export async function executeTask(
           await updateTaskStep(stepRecord.id, { status: 'running' });
           
           let result: ToolResult;
-          
+
           if (BUILT_IN_TOOLS.includes(step.tool)) {
-            result = await executeTool(step.tool, step.input || {}, internalUserId, DEFAULT_POLICY);
+            result = await executeTool(step.tool, step.input || {}, internalUserId, policy);
+          } else if (
+            !isGtmToolkit(step.tool) ||
+            (policy.allowedToolkits &&
+              !policy.allowedToolkits.some((tk) => tk.toLowerCase() === step.tool.split('_')[0].toLowerCase()))
+          ) {
+            // Not a GTM toolkit, or outside this agent's scoped toolkits — refuse before ever calling Composio.
+            result = { success: false, error: `Tool not permitted: ${step.tool}` };
           } else {
             // Attempt Composio call
             let composioResult = await executeComposioToolCall(composioUserId, {

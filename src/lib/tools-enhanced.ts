@@ -2,6 +2,8 @@ import { z } from 'zod';
 import type { ToolDefinition, ToolExecution } from '@/types/database';
 import { getToolCategory, isComposioToolName, DEFAULT_POLICY, type CapabilityPolicy, type ToolCategory } from './tool-categories';
 import { searchTools, executeComposioToolCall, createComposioMetaTools } from './composio/index';
+import { isGtmToolkit } from './gtm-toolkits';
+import { browserSearch, browserScrape } from './browser';
 
 export interface ToolResult {
   success: boolean;
@@ -159,19 +161,9 @@ export function setToolEnabled(name: string, enabled: boolean): void {
   }
 }
 
-// Remove a tool from the registry (e.g. an unregistered Agent Foundry tool)
+// Remove a tool from the registry
 export function unregisterTool(name: string): void {
   toolRegistry.delete(name);
-}
-
-// Agent Foundry tools already pass a stronger, explicit gate (safety scan + self-test +
-// human "Install & Register" click) than DEFAULT_POLICY's static allowlist was designed
-// to enforce — so once one is registered, allow the main agent's planner to actually
-// call it instead of silently blocking on "Tool not permitted".
-export function allowToolByDefault(name: string): void {
-  if (!DEFAULT_POLICY.allowedTools.includes(name)) {
-    DEFAULT_POLICY.allowedTools.push(name);
-  }
 }
 
 // Get all registered tool definitions
@@ -226,18 +218,27 @@ function isToolAllowed(name: string, policy?: CapabilityPolicy): boolean {
     if (name === 'composio_manage_connections') return false; // Always blocked unless YOLO
     return false;
   }
-  
+
+  // Raw Composio tool names (GMAIL_SEND_EMAIL, hubspot_create_contact, ...) — only GTM
+  // toolkits, narrowed further to policy.allowedToolkits for a scoped agent run.
+  if (isComposioToolName(name)) {
+    if (!policy.allowComposioExecute || !isGtmToolkit(name)) return false;
+    if (!policy.allowedToolkits) return true;
+    const prefix = name.split('_')[0].toLowerCase();
+    return policy.allowedToolkits.some((tk) => tk.toLowerCase() === prefix);
+  }
+
   // Critical tools
   if (category === 'critical') return false;
-  
+
   // Blocked list
   if (policy.blockedTools.includes(name)) return false;
-  
+
   // Allowed list
   if (policy.allowedTools.includes(name)) return true;
-  
+
   // Default based on category
-  return category === 'read';
+  return category === 'read' || category === 'browser';
 }
 
 // Execute a tool by name
@@ -334,7 +335,17 @@ async function executeMetaTool(
     
     const { query, limit = 20 } = input as { query: string; limit?: number };
     const results = await searchTools(query, limit, userId);
-    
+
+    // GTM-only, further narrowed to policy.allowedToolkits for a scoped agent run —
+    // the planner never even sees a toolkit the agent wasn't scoped to.
+    const allowed = policy?.allowedToolkits;
+    results.tools = results.tools.filter((t) => {
+      if (!isGtmToolkit(t.name)) return false;
+      if (!allowed) return true;
+      const prefix = t.name.split('_')[0].toLowerCase();
+      return allowed.some((tk) => tk.toLowerCase() === prefix);
+    });
+
     return {
       success: true,
       data: results,
@@ -379,114 +390,41 @@ async function executeMetaTool(
 }
 
 // Built-in tools with Zod schemas
-const githubCreateIssueSchema = z.object({
-  owner: z.string().describe('Repository owner'),
-  repo: z.string().describe('Repository name'),
-  title: z.string().describe('Issue title'),
-  body: z.string().optional().describe('Issue body'),
-  labels: z.array(z.string()).optional().describe('Issue labels'),
+const browserSearchSchema = z.object({
+  query: z.string().describe('Search query'),
+  limit: z.number().optional().default(5),
 });
 
-export class GitHubCreateIssueTool implements BaseTool {
-  name = 'github_create_issue';
-  description = 'Create a new issue in a GitHub repository';
-  category: ToolCategory = 'write';
-  inputSchema = githubCreateIssueSchema;
+export class BrowserSearchTool implements BaseTool {
+  name = 'browser_search';
+  description = 'Search the open web (used when no connected GTM toolkit covers this directly)';
+  category: ToolCategory = 'browser';
+  inputSchema = browserSearchSchema;
 
-  async execute(input: Record<string, unknown>, userId: string): Promise<ToolResult> {
-    const { owner, repo, title, body, labels } = input as z.infer<typeof githubCreateIssueSchema>;
-    
-    const token = process.env.GITHUB_TOKEN;
-    if (!token) {
-      return { success: false, error: 'GITHUB_TOKEN not configured' };
-    }
-
-    try {
-      const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/vnd.github.v3+json',
-        },
-        body: JSON.stringify({ title, body: body || '', labels: labels || [] }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        return { success: false, error: error.message || 'GitHub API error' };
-      }
-
-      const issue = await response.json();
-      return {
-        success: true,
-        data: {
-          id: issue.id,
-          number: issue.number,
-          title: issue.title,
-          url: issue.html_url,
-          state: issue.state,
-        },
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'GitHub request failed',
-      };
-    }
+  async execute(input: Record<string, unknown>): Promise<ToolResult> {
+    const { query, limit = 5 } = input as z.infer<typeof browserSearchSchema>;
+    const result = await browserSearch(query, limit);
+    if (!result.success) return { success: false, error: result.error };
+    return { success: true, data: { query, results: result.results } };
   }
 }
 
-const githubGetIssuesSchema = z.object({
-  owner: z.string().describe('Repository owner'),
-  repo: z.string().describe('Repository name'),
-  state: z.enum(['open', 'closed', 'all']).optional().default('open'),
-  per_page: z.number().optional().default(10),
+const browserScrapeSchema = z.object({
+  url: z.string().url().describe('URL to fetch and clean into markdown'),
 });
 
-export class GitHubGetIssuesTool implements BaseTool {
-  name = 'github_get_issues';
-  description = 'List issues in a GitHub repository';
-  category: ToolCategory = 'read';
-  inputSchema = githubGetIssuesSchema;
+export class BrowserScrapeTool implements BaseTool {
+  name = 'browser_scrape';
+  description = 'Fetch a page and return its content as clean markdown';
+  category: ToolCategory = 'browser';
+  inputSchema = browserScrapeSchema;
 
-  async execute(input: Record<string, unknown>, userId: string): Promise<ToolResult> {
-    const { owner, repo, state = 'open', per_page = 10 } = input as z.infer<typeof githubGetIssuesSchema>;
-    
-    const token = process.env.GITHUB_TOKEN;
-    const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    try {
-      const params = new URLSearchParams({ state, per_page: String(per_page) });
-      const response = await fetch(
-        `https://api.github.com/repos/${owner}/${repo}/issues?${params}`,
-        { headers }
-      );
-
-      if (!response.ok) {
-        const error = await response.json();
-        return { success: false, error: error.message || 'GitHub API error' };
-      }
-
-      const issues = await response.json();
-      return {
-        success: true,
-        data: issues.map((issue: Record<string, unknown>) => ({
-          id: issue.id,
-          number: issue.number,
-          title: issue.title,
-          state: issue.state,
-          url: issue.html_url,
-          created_at: issue.created_at,
-        })),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'GitHub request failed',
-      };
-    }
+  async execute(input: Record<string, unknown>): Promise<ToolResult> {
+    const { url } = input as z.infer<typeof browserScrapeSchema>;
+    if (!isValidUrl(url)) return { success: false, error: 'Invalid or prohibited URL' };
+    const result = await browserScrape(url);
+    if (!result.success) return { success: false, error: result.error };
+    return { success: true, data: { url, title: result.title, markdown: result.markdown } };
   }
 }
 
@@ -651,101 +589,20 @@ export class EmailSendTool implements BaseTool {
   }
 }
 
-const twitterPostSchema = z.object({
-  text: z.string().max(280).describe('Tweet text'),
-});
-
-export class TwitterPostTool implements BaseTool {
-  name = 'twitter_post';
-  description = 'Post a tweet';
-  category: ToolCategory = 'write';
-  inputSchema = twitterPostSchema;
-
-  async execute(input: Record<string, unknown>, userId: string): Promise<ToolResult> {
-    const { text } = input as z.infer<typeof twitterPostSchema>;
-    
-    const bearerToken = process.env.TWITTER_BEARER_TOKEN;
-    if (!bearerToken) {
-      return {
-        success: true,
-        data: {
-          id: `simulated-${Date.now()}`,
-          text,
-          created_at: new Date().toISOString(),
-          simulated: true,
-        },
-      };
-    }
-
-    try {
-      const response = await fetch('https://api.twitter.com/2/tweets', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${bearerToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ text }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        return { success: false, error: error.detail || 'Twitter API error' };
-      }
-
-      const tweet = await response.json();
-      return {
-        success: true,
-        data: {
-          id: tweet.data?.id,
-          text: tweet.data?.text,
-          created_at: new Date().toISOString(),
-        },
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Twitter request failed',
-      };
-    }
-  }
-}
-
 let builtInsRegistered = false;
-let generatedToolsLoadStarted = false;
-
-// Load Agent Foundry tools that were previously registered (survives a server restart
-// in environments with a persistent filesystem — see src/lib/foundry.ts). Deferred
-// dynamic import avoids a hard circular dependency between this module and foundry.ts.
-async function loadPersistedGeneratedTools(): Promise<void> {
-  try {
-    const { loadAllRegisteredGeneratedTools } = await import('./foundry');
-    const count = await loadAllRegisteredGeneratedTools();
-    if (count > 0) {
-      console.log(`[Tools] Loaded ${count} generated tool(s) from Agent Foundry`);
-    }
-  } catch (e) {
-    console.error('[Tools] Failed to load generated tools:', e);
-  }
-}
 
 // Initialize all built-in tools
 export function initializeTools(): void {
   if (!builtInsRegistered) {
-    registerTool(new GitHubCreateIssueTool());
-    registerTool(new GitHubGetIssuesTool());
     registerTool(new HTTPRequestTool());
     registerTool(new MemoryStoreTool());
     registerTool(new MemoryRecallTool());
     registerTool(new EmailSendTool());
-    registerTool(new TwitterPostTool());
+    registerTool(new BrowserSearchTool());
+    registerTool(new BrowserScrapeTool());
     builtInsRegistered = true;
 
     console.log(`[Tools] Initialized ${toolRegistry.size} tools`);
-  }
-
-  if (!generatedToolsLoadStarted) {
-    generatedToolsLoadStarted = true;
-    void loadPersistedGeneratedTools();
   }
 }
 

@@ -92,7 +92,7 @@ export async function POST(request: NextRequest) {
     }
 
     const user = await getOrCreateClerkUser(clerkUserId);
-    const BUILT_IN_TOOLS = ['memory_store', 'memory_recall', 'http_request', 'github_create_issue', 'github_get_issues', 'email_send', 'twitter_post'];
+    const BUILT_IN_TOOLS = ['memory_store', 'memory_recall', 'http_request', 'email_send', 'browser_search', 'browser_scrape'];
 
     if (BUILT_IN_TOOLS.includes(toolName)) {
       const { executeTool } = await import('@/lib/tools-enhanced');

@@ -1,6 +1,7 @@
 import { Composio } from '@composio/core';
 import type { ToolDefinition } from '@/types/database';
 import { isToolAllowed, type CapabilityPolicy } from './tool-categories';
+import { isGtmToolkit } from './gtm-toolkits';
 
 export interface ComposioTool {
   name: string;
@@ -74,13 +75,15 @@ export async function getComposioTools(userId: string): Promise<ComposioTool[]> 
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return tools.map((tool: any) => ({
-      name: tool.name || tool.function?.name || String(tool),
-      description: tool.description || `Execute tool`,
-      inputSchema: tool.parameters || tool.function?.parameters || {},
-      enabled: true,
-      connected: true,
-    }));
+    return tools
+      .map((tool: any) => ({
+        name: tool.name || tool.function?.name || String(tool),
+        description: tool.description || `Execute tool`,
+        inputSchema: tool.parameters || tool.function?.parameters || {},
+        enabled: true,
+        connected: true,
+      }))
+      .filter((tool) => isGtmToolkit(tool.name)); // GTM OS: no non-GTM app access
   } catch (error) {
     console.error('[Composio] Failed to fetch tools:', error);
     return [];
@@ -95,9 +98,13 @@ export async function executeComposioToolCall(
     return { success: false, error: 'Composio not configured' };
   }
 
+  if (!isGtmToolkit(toolCall.name)) {
+    return { success: false, error: `${toolCall.name} is not a GTM toolkit — refusing to call it` };
+  }
+
   try {
     const session = await getComposioSession(userId);
-    
+
     const result = await session.execute(toolCall.name, toolCall.parameters);
 
     return { success: true, data: result, error: '' };
@@ -331,17 +338,17 @@ export async function searchTools(
     const results = await session.search({ query, toolkits: [] });
     
     const items = (results as any).items || [];
-    return {
-      tools: items.slice(0, limit).map((tool: any) => ({
+    const tools = items
+      .map((tool: any) => ({
         name: tool.name || tool.toolSlug || String(tool),
         description: tool.description || `Execute ${tool.name || tool.toolSlug}`,
         inputSchema: {},
         enabled: true,
         connected: true,
-      })),
-      total: items.length,
-      query,
-    };
+      }))
+      .filter((tool: ComposioTool) => isGtmToolkit(tool.name)) // GTM OS: no non-GTM app access
+      .slice(0, limit);
+    return { tools, total: tools.length, query };
   } catch (error) {
     console.error('[Composio] Tool search failed:', error);
     return { tools: [], total: 0, query };

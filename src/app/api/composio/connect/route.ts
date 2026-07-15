@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
 import { getToolRouter } from '@/lib/composio/index';
 import { getOrCreateClerkUser } from '@/lib/database';
+import { isGtmToolkit } from '@/lib/gtm-toolkits';
 
 export async function POST(request: NextRequest) {
   try {
     const { userId: clerkUserId } = await auth();
-    
+
     if (!clerkUserId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -16,6 +17,10 @@ export async function POST(request: NextRequest) {
 
     if (!toolkit) {
       return NextResponse.json({ error: 'Missing toolkit parameter' }, { status: 400 });
+    }
+
+    if (!isGtmToolkit(toolkit)) {
+      return NextResponse.json({ error: `${toolkit} is not a GTM toolkit` }, { status: 400 });
     }
 
     const internalUser = await getOrCreateClerkUser(clerkUserId);
@@ -56,16 +61,20 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Missing toolkit parameter' }, { status: 400 });
     }
 
+    if (!isGtmToolkit(toolkit)) {
+      return NextResponse.json({ error: `${toolkit} is not a GTM toolkit` }, { status: 400 });
+    }
+
     const internalUser = await getOrCreateClerkUser(clerkUserId);
     const router = getToolRouter();
-    
+
     // Create or get session for the user
     const session = await router.getOrCreateSession("anymind-main", internalUser.id);
-    
+
     // Initiate authentication for the toolkit
     const authState = await router.initiateAuth(session.id, toolkit);
 
-    return NextResponse.json({ 
+    return NextResponse.json({
       authUrl: authState.linkUrl || null,
       status: authState.status,
       connectedAccountId: authState.connectedAccountId

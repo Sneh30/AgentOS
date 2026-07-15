@@ -77,31 +77,30 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Generated tools table (Agent Foundry)
-CREATE TABLE IF NOT EXISTS generated_tools (
+-- GTM Agent Library — named, reusable workflows composed from GTM toolkits + memory + browser
+CREATE TABLE IF NOT EXISTS gtm_agents (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   created_by UUID REFERENCES users(id) ON DELETE SET NULL,
-  name TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
   description TEXT NOT NULL,
-  category TEXT NOT NULL DEFAULT 'write' CHECK (category IN ('read','write','delete','execute','mcp','composio','critical')),
-  input_schema JSONB NOT NULL,
-  example_input JSONB DEFAULT '{}',
-  source_code TEXT NOT NULL,
-  file_path TEXT NOT NULL,
-  dependencies JSONB DEFAULT '[]',
-  version TEXT NOT NULL DEFAULT '1.0.0',
-  author TEXT NOT NULL DEFAULT 'Anymind AI',
-  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','tested','registered','failed','disabled')),
-  test_result JSONB,
-  safety_scan JSONB,
-  last_used_at TIMESTAMPTZ,
-  use_count INTEGER DEFAULT 0,
+  goal_template TEXT NOT NULL,
+  toolkits JSONB NOT NULL DEFAULT '[]',
+  input_schema JSONB NOT NULL DEFAULT '{}',
+  trigger TEXT NOT NULL DEFAULT 'manual' CHECK (trigger IN ('manual', 'schedule', 'webhook')),
+  schedule TEXT,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'disabled')),
+  source TEXT NOT NULL DEFAULT 'custom' CHECK (source IN ('template', 'generated', 'custom')),
+  last_run_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Additive migration for installs that ran this file before example_input existed
-ALTER TABLE generated_tools ADD COLUMN IF NOT EXISTS example_input JSONB DEFAULT '{}';
+-- Drop Agent Foundry's runtime-codegen table — replaced by the declarative gtm_agents
+-- pipeline (see src/lib/agents/generate.ts). No code is ever generated or sandboxed now.
+DROP TABLE IF EXISTS generated_tools;
+
+-- gtm_agents needs an agent_id FK on tasks so a task can be traced back to the agent run it belongs to
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS agent_id UUID REFERENCES gtm_agents(id) ON DELETE SET NULL;
 
 -- Create indexes for better query performance
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
@@ -112,7 +111,8 @@ CREATE INDEX IF NOT EXISTS idx_executions_user_id ON executions(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_nodes_user_id ON memory_nodes(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_nodes_type ON memory_nodes(type);
 CREATE INDEX IF NOT EXISTS idx_memory_nodes_created_at ON memory_nodes(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_generated_tools_status ON generated_tools(status);
+CREATE INDEX IF NOT EXISTS idx_gtm_agents_status ON gtm_agents(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_agent_id ON tasks(agent_id);
 
 -- Enable RLS
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
@@ -120,7 +120,7 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE task_steps ENABLE ROW LEVEL SECURITY;
 ALTER TABLE executions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_nodes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE generated_tools ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gtm_agents ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies (users can only access their own data via auth.uid())
 CREATE POLICY "Users can view own profile" ON users
@@ -146,8 +146,19 @@ CREATE POLICY "Users can manage own executions" ON executions
 CREATE POLICY "Users can manage own memories" ON memory_nodes
   FOR ALL USING (auth.uid() = user_id);
 
-CREATE POLICY "Anyone authenticated can view generated tools" ON generated_tools
+-- Shared agent library: any authenticated user can see and run every agent (org-wide),
+-- but only the creator (or a NULL created_by seed/template row) can edit or delete it.
+CREATE POLICY "Anyone authenticated can view gtm agents" ON gtm_agents
   FOR SELECT USING (true);
+
+CREATE POLICY "Users can create gtm agents" ON gtm_agents
+  FOR INSERT WITH CHECK (auth.uid() = created_by);
+
+CREATE POLICY "Users can update own gtm agents" ON gtm_agents
+  FOR UPDATE USING (auth.uid() = created_by OR created_by IS NULL);
+
+CREATE POLICY "Users can delete own gtm agents" ON gtm_agents
+  FOR DELETE USING (auth.uid() = created_by OR created_by IS NULL);
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at()
@@ -168,7 +179,7 @@ CREATE TRIGGER update_tasks_updated_at BEFORE UPDATE ON tasks
 CREATE TRIGGER update_memory_nodes_updated_at BEFORE UPDATE ON memory_nodes
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
-CREATE TRIGGER update_generated_tools_updated_at BEFORE UPDATE ON generated_tools
+CREATE TRIGGER update_gtm_agents_updated_at BEFORE UPDATE ON gtm_agents
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- Auto-create user profile when they sign up via trigger

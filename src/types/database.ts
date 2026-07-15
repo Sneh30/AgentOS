@@ -1,5 +1,3 @@
-import type { ToolCategory } from '@/lib/tool-categories';
-
 // Database types
 export interface DbUser {
   id: string;
@@ -21,6 +19,7 @@ export interface DbTask {
   plan?: TaskPlan;
   result?: unknown;
   error?: string;
+  agent_id?: string;
   created_at: string;
   updated_at: string;
 }
@@ -64,24 +63,19 @@ export interface DbMemoryNode {
   updated_at: string;
 }
 
-export interface DbGeneratedTool {
+export interface DbGtmAgent {
   id: string;
   created_by?: string;
   name: string;
   description: string;
-  category: ToolCategory;
-  input_schema: Record<string, unknown>;
-  example_input: Record<string, unknown>;
-  source_code: string;
-  file_path: string;
-  dependencies: string[];
-  version: string;
-  author: string;
-  status: 'draft' | 'tested' | 'registered' | 'failed' | 'disabled';
-  test_result?: { success: boolean; error?: string; output?: unknown; durationMs: number };
-  safety_scan?: { passed: boolean; issues: string[] };
-  last_used_at?: string;
-  use_count: number;
+  goal_template: string;
+  toolkits: string[];
+  input_schema: Record<string, { type: string; description?: string; optional?: boolean }>;
+  trigger: 'manual' | 'schedule' | 'webhook';
+  schedule?: string;
+  status: 'draft' | 'active' | 'disabled';
+  source: 'template' | 'generated' | 'custom';
+  last_run_at?: string;
   created_at: string;
   updated_at: string;
 }

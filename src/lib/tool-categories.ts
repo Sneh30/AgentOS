@@ -1,10 +1,13 @@
-export type ToolCategory = 
+import { isGtmToolkit } from './gtm-toolkits';
+
+export type ToolCategory =
   | 'read'       // View, search, retrieve - always allowed
   | 'write'      // Create, edit, modify - ask permission
-  | 'delete'     // Remove, destroy - ask permission  
+  | 'delete'     // Remove, destroy - ask permission
   | 'execute'    // Run commands, code - restricted
   | 'mcp'        // MCP server tools - ask permission
   | 'composio'   // Composio meta-tools - policy-based
+  | 'browser'    // Firecrawl-backed web search/scrape - always allowed
   | 'critical'; // Dangerous operations - YOLO only
 
 export interface ToolCapability {
@@ -31,39 +34,35 @@ export interface CapabilityPolicy {
   allowedTools: string[];
   blockedTools: string[];
   maxSteps: number;
+  // When set (a GTM agent run scoped to specific toolkits), Composio calls are further
+  // narrowed to this subset of the GTM allowlist — not just "any GTM toolkit".
+  allowedToolkits?: string[];
 }
 
 export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   // Read tools - always allowed
   'search_memory': 'read',
   'memory_recall': 'read',
-  'github_get_issues': 'read',
-  'github_get_repo': 'read',
   'http_request': 'read',
-  'web_search': 'read',
-  
+  'browser_search': 'browser',
+  'browser_scrape': 'browser',
+
   // Write tools - ask permission
-  'github_create_issue': 'write',
-  'github_create_pr': 'write',
-  'github_comment': 'write',
-  'twitter_post': 'write',
   'email_send': 'write',
   'memory_store': 'write',
-  
+
   // Delete tools - ask permission
-  'github_delete_issue': 'delete',
-  'github_delete_comment': 'delete',
   'memory_delete': 'delete',
-  
+
   // Execute tools - restricted
   'workspace_execute_command': 'execute',
   'code_interpreter': 'execute',
-  
+
   // Composio meta-tools
   'composio_search_tools': 'composio',
   'composio_execute_tool': 'composio',
   'composio_manage_connections': 'composio',
-  
+
   // Critical - YOLO only
   'workspace_delete': 'critical',
   'workspace_format': 'critical',
@@ -75,11 +74,11 @@ export const DEFAULT_POLICY: CapabilityPolicy = {
   allowWorkspace: false,
   allowedTools: [
     'search_memory',
-    'memory_recall', 
+    'memory_recall',
     'memory_store',
-    'github_get_issues',
-    'github_create_issue',
     'http_request',
+    'browser_search',
+    'browser_scrape',
   ],
   blockedTools: [
     'workspace_delete',
@@ -100,18 +99,22 @@ export function isComposioToolName(name: string): boolean {
 }
 
 export function isToolAllowed(
-  toolName: string, 
+  toolName: string,
   policy: CapabilityPolicy
 ): boolean {
   if (policy.blockedTools.includes(toolName)) return false;
   if (policy.allowedTools.includes(toolName)) return true;
-  
-  // Allow Composio tools if explicitly enabled in policy
+
+  // Allow Composio tools if explicitly enabled in policy — but only for GTM toolkits,
+  // narrowed further to policy.allowedToolkits when a run is scoped to a specific agent.
   if (policy.allowComposioExecute) {
-    if (toolName.startsWith('composio_') || isComposioToolName(toolName)) {
-      return true;
+    if (toolName.startsWith('composio_')) return true;
+    if (isComposioToolName(toolName) && isGtmToolkit(toolName)) {
+      if (!policy.allowedToolkits) return true;
+      const prefix = toolName.split('_')[0].toLowerCase();
+      return policy.allowedToolkits.some((tk) => tk.toLowerCase() === prefix);
     }
   }
-  
+
   return false;
 }

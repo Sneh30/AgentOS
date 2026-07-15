@@ -61,6 +61,11 @@ import {
 import type { Agent, AgentThought, AgentPlan, AgentStep, BackgroundTask } from '@/lib/agent';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { AgentCard } from '@/components/agents/AgentCard';
+import { AgentBuilder } from '@/components/agents/AgentBuilder';
+import type { DbGtmAgent } from '@/types/database';
+import { Library } from 'lucide-react';
 
 const AUTONOMOUS_MODES = [
   {
@@ -111,9 +116,47 @@ export default function AgentPage() {
   const timedIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
 
+  // GTM Agent Library
+  const [mainTab, setMainTab] = useState<'library' | 'console'>('library');
+  const [gtmAgents, setGtmAgents] = useState<DbGtmAgent[]>([]);
+  const [builderOpen, setBuilderOpen] = useState(false);
+
+  const loadGtmAgents = async () => {
+    try {
+      const response = await fetch('/api/agents');
+      const data = await response.json();
+      setGtmAgents(data.agents || []);
+    } catch (error) {
+      console.error('Failed to load GTM agents:', error);
+    }
+  };
+
+  const handleActivateGtmAgent = async (id: string) => {
+    await fetch(`/api/agents/${id}/activate`, { method: 'POST' });
+    await loadGtmAgents();
+  };
+
+  const handleDeleteGtmAgent = async (id: string) => {
+    await fetch(`/api/agents/${id}`, { method: 'DELETE' });
+    await loadGtmAgents();
+  };
+
+  const handleRunGtmAgent = async (id: string, inputs: Record<string, string>): Promise<string> => {
+    const response = await fetch(`/api/agents/${id}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inputs }),
+    });
+    const data = await response.json();
+    await loadGtmAgents();
+    if (!response.ok) return data.error || 'Run failed';
+    return data.error || 'Started — check Tasks for the full result.';
+  };
+
   useEffect(() => {
     createAgent();
     loadTasks();
+    loadGtmAgents();
   }, []);
 
   // Countdown timer for timed mode
@@ -468,9 +511,9 @@ export default function AgentPage() {
                 <Bot className="size-5 text-white" />
               </div>
               <div>
-                <h1 className="text-xl md:text-2xl font-semibold tracking-tight">Autonomous Agent</h1>
+                <h1 className="text-xl md:text-2xl font-semibold tracking-tight">GTM Agent</h1>
                 <p className="text-xs md:text-sm text-muted-foreground">
-                  AI-powered automation for any task
+                  Your GTM agent library, and the console for whatever's running
                 </p>
               </div>
             </div>
@@ -510,6 +553,53 @@ export default function AgentPage() {
         </div>
       </div>
 
+      <Tabs value={mainTab} onValueChange={(v) => setMainTab(v as 'library' | 'console')} className="px-4 md:px-6 pt-3">
+        <TabsList>
+          <TabsTrigger value="library" className="gap-1.5">
+            <Library className="size-3.5" />
+            Library
+          </TabsTrigger>
+          <TabsTrigger value="console" className="gap-1.5">
+            <Bot className="size-3.5" />
+            Run Console
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
+
+      {mainTab === 'library' && (
+        <div className="p-4 md:p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="font-semibold">GTM Agent Library</h2>
+              <p className="text-xs text-muted-foreground">Named, reusable workflows built from GTM toolkits, memory, and the browser.</p>
+            </div>
+            <Button size="sm" onClick={() => setBuilderOpen(true)}>
+              <Plus className="size-4 mr-1" />
+              New Agent
+            </Button>
+          </div>
+          {gtmAgents.length === 0 ? (
+            <Card className="p-8 text-center border-border/50">
+              <p className="text-sm text-muted-foreground">No agents yet. Describe a workflow to build your first one.</p>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {gtmAgents.map((agent) => (
+                <AgentCard
+                  key={agent.id}
+                  agent={agent}
+                  onActivate={handleActivateGtmAgent}
+                  onDelete={handleDeleteGtmAgent}
+                  onRun={handleRunGtmAgent}
+                />
+              ))}
+            </div>
+          )}
+          <AgentBuilder open={builderOpen} onOpenChange={setBuilderOpen} onCreated={loadGtmAgents} />
+        </div>
+      )}
+
+      {mainTab === 'console' && (
       <div className="flex flex-col lg:flex-row h-[calc(100vh-8rem)]">
         {/* Main Content */}
         <div className="flex-1 overflow-auto p-4 md:p-6 space-y-4">
@@ -933,6 +1023,7 @@ Examples:
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }

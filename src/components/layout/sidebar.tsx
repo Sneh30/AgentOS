@@ -8,7 +8,6 @@ import {
   Home,
   ListTodo,
   Brain,
-  Hammer,
   User,
   Settings,
   Bot,
@@ -43,11 +42,6 @@ const navItems = [
     label: 'Memory',
     href: '/memory',
     icon: Brain,
-  },
-  {
-    label: 'Foundry',
-    href: '/foundry',
-    icon: Hammer,
   },
   {
     label: 'Profile',

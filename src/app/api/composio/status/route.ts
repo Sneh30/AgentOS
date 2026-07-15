@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
 import { getToolRouter } from '@/lib/composio/index';
 import { getOrCreateClerkUser } from '@/lib/database';
+import { isGtmToolkit } from '@/lib/gtm-toolkits';
 
 export async function GET() {
   try {
@@ -34,12 +35,13 @@ export async function GET() {
     globalToolkits.forEach(t => toolkitMap.set(t.slug, t));
     sessionToolkits.forEach(t => toolkitMap.set(t.slug, { ...toolkitMap.get(t.slug), ...t }));
     
-    const toolkits = Array.from(toolkitMap.values());
+    // GTM OS only ever surfaces GTM toolkits — never offers to connect an arbitrary app.
+    const toolkits = Array.from(toolkitMap.values()).filter((t: any) => isGtmToolkit(t.slug));
     const connected = toolkits.filter((t: any) => t.connection?.is_active).map((t: any) => t.slug);
-    
-    return NextResponse.json({ 
-      connected, 
-      toolkits 
+
+    return NextResponse.json({
+      connected,
+      toolkits
     });
   } catch (error) {
     console.error('[API] Composio status error:', error);
