@@ -41,20 +41,57 @@ export async function executeComposioToolCall(clerkUserId: string, toolCall: { n
       arguments: toolCall.parameters
     });
     
+    // Check for auth-related errors in successful responses
+    // (Composio sometimes returns 200 with error body for scope/permission issues)
+    if (!result.success && result.error) {
+      const errMsg = typeof result.error === 'string' ? result.error : (result.error as any)?.message || '';
+      if (
+        errMsg.includes('insufficient') ||
+        errMsg.includes('authentication scopes') ||
+        errMsg.includes('403') ||
+        errMsg.includes('No active connection')
+      ) {
+        console.log(`[ComposioIndex] Detected auth error in response for ${toolCall.name}. Initiating re-auth...`);
+        let toolkitSlug = toolCall.name.split('_')[0];
+        try {
+          const authInfo = await initiateComposioAuth(clerkUserId, toolkitSlug);
+          if (authInfo.linkUrl) {
+            return {
+              success: false,
+              authRequired: true,
+              toolkit: toolkitSlug,
+              authUrl: authInfo.linkUrl,
+              error: {
+                message: `I need permission to access ${toolkitSlug.toUpperCase()}. Click the link to connect your account.`,
+                code: "AUTH_REQUIRED"
+              }
+            };
+          }
+        } catch (authError) {
+          console.error(`[ComposioIndex] Failed to initiate re-auth for ${toolkitSlug}:`, authError);
+        }
+      }
+    }
+    
     return result;
   } catch (error: any) {
     console.error(`[ComposioIndex] Execution failed for ${toolCall.name}:`, error);
     
-    // Check for 4302 (No Connection)
     const errorCode = error.code || (error.originalError as any)?.code;
     const errorMessage = error.message || "";
     
-    if (errorCode === "4302" || errorMessage.includes("No active connection found")) {
-      console.log(`[ComposioIndex] Detected missing connection for ${toolCall.name}. Initiating auth for ${clerkUserId}...`);
+    const needsReauth = (
+      errorCode === "4302" ||
+      errorMessage.includes("No active connection found") ||
+      errorMessage.includes("insufficient authentication scopes") ||
+      errorMessage.includes("insufficient scopes") ||
+      errorMessage.includes("403")
+    );
+    
+    if (needsReauth) {
+      console.log(`[ComposioIndex] Detected missing/insufficient auth for ${toolCall.name}. Initiating auth for ${clerkUserId}...`);
       
-      // Extract toolkit slug from error message or tool name
-      // Example message: "No active connection found for toolkit(s) 'gmail' in this session..."
-      let toolkitSlug = toolCall.name.split('_')[0]; // Default fallback
+      let toolkitSlug = toolCall.name.split('_')[0];
       const match = errorMessage.match(/toolkit\(s\)\s+'([^']+)'/);
       if (match && match[1]) {
         toolkitSlug = match[1];
@@ -69,7 +106,9 @@ export async function executeComposioToolCall(clerkUserId: string, toolCall: { n
             toolkit: toolkitSlug,
             authUrl: authInfo.linkUrl,
             error: {
-              message: `I need permission to access ${toolkitSlug.toUpperCase()}. Please click the link to connect your account.`,
+              message: `I need permission to access ${toolkitSlug.toUpperCase()}. Please click the link to connect your account.${
+                errorMessage.includes('insufficient') ? ' (previous connection had insufficient scopes)' : ''
+              }`,
               code: "AUTH_REQUIRED"
             }
           };
