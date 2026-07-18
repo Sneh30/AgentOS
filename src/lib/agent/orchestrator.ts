@@ -1,11 +1,10 @@
-import { generatePlan } from '@/lib/google';
+import { generatePlan, callLLM as callLlmProvider } from '@/lib/google';
 import { getContextForTaskWithKnowledge, storeMemory as hydraStoreMemory } from '@/lib/hydra';
 import { createMemoryNode } from '@/lib/database';
 import { summarizeForMemory } from '@/lib/executor-enhanced';
 import { executeTool, getRegisteredTools } from '@/lib/tools-enhanced';
 import { executeComposioToolCall } from '@/lib/composio';
 import { DEFAULT_POLICY } from '@/lib/tool-categories';
-import { extractJSON } from '../json';
 
 export type AgentStatus = 'idle' | 'planning' | 'executing' | 'paused' | 'completed' | 'failed';
 export type AgentPriority = 'low' | 'medium' | 'high' | 'critical';
@@ -400,45 +399,25 @@ Output your thought process in JSON format:
   }
 
   private async callLLM(prompt: string): Promise<Record<string, unknown>> {
-    const apiKey = process.env.GOOGLE_API_KEY;
-    const apiUrlBase = process.env.GOOGLE_API_URL || 'https://generativelanguage.googleapis.com/v1beta/';
-    const model = process.env.GOOGLE_MODEL || 'gemini-flash-latest';
+    try {
+      const result = await callLlmProvider(
+        [{ role: 'user', content: prompt }],
+        { temperature: 0.7, maxOutputTokens: 1024 }
+      );
 
-    if (!apiKey) {
+      if ('error' in result) {
+        throw new Error(result.error);
+      }
+
+      return JSON.parse(result.content);
+    } catch (error) {
+      console.error('[AgentOrchestrator] LLM call failed:', error);
       return {
-        thought: 'API key not configured - operating in fallback mode',
-        reasoning: 'Cannot call LLM without API key',
+        thought: 'LLM not available - operating in fallback mode',
+        reasoning: error instanceof Error ? error.message : 'Unknown error',
         decision: 'Use simple heuristics',
         confidence: 0.3,
       };
-    }
-
-    try {
-      const base = apiUrlBase.endsWith('/') ? apiUrlBase : `${apiUrlBase}/`;
-      const response = await fetch(`${base}models/${model}:generateContent?key=${apiKey}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`LLM API error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const content = data.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || '').join('');
-
-      if (!content) throw new Error('No response from LLM');
-
-      return extractJSON(content);
-    } catch (error) {
-      console.error('[AgentOrchestrator] LLM call failed:', error);
-      throw error;
     }
   }
 
