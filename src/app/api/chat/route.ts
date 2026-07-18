@@ -2,10 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
 import { getOrCreateClerkUser } from '@/lib/database';
 import { getComposioTools } from '@/lib/composio';
-
-const GOOGLE_API_URL = process.env.GOOGLE_API_URL || 'https://generativelanguage.googleapis.com/v1beta/';
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
-const GOOGLE_MODEL = process.env.GOOGLE_MODEL || 'gemini-flash-latest';
+import { callLLM } from '@/lib/google';
 
 interface ChatTask {
   id: string;
@@ -117,25 +114,19 @@ When appropriate, use available tools to help user.
 ${toolDescriptions}
 Respond directly and concisely.`;
 
-    const base = GOOGLE_API_URL.endsWith('/') ? GOOGLE_API_URL : `${GOOGLE_API_URL}/`;
-    const response = await fetch(`${base}models/${GOOGLE_MODEL}:generateContent?key=${GOOGLE_API_KEY}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: input }] }],
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { maxOutputTokens: 800 },
-      }),
-    });
+    const result = await callLLM(
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: input },
+      ],
+      { maxOutputTokens: 800 }
+    );
 
-    if (!response.ok) {
-      return NextResponse.json({ error: `Google error: ${response.status}` }, { status: 500 });
+    if ('error' in result) {
+      return NextResponse.json({ error: `LLM error: ${result.error}` }, { status: 500 });
     }
 
-    const data = await response.json();
-    const reply = data.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || '').join('') || 'No response';
+    const reply = result.content || 'No response';
 
     const userTasks = inMemoryTasks.get(effectiveUserId) || [];
     userTasks.unshift({
