@@ -514,11 +514,9 @@ export async function executeTask(
 
     const memoryText = summarizeForMemory(input, finalResult.answer || finalResult);
 
-    try {
-      await hydraStoreMemory(memoryText, { userId: internalUserId, taskId: task.id });
-      console.log('[Executor] Memory stored in HydraDB');
-    } catch (hydraError) {
-      console.warn('[Executor] HydraDB storage failed, falling back to Supabase:', hydraError);
+    const memResult = await hydraStoreMemory(memoryText, { userId: internalUserId, taskId: task.id });
+    if (!memResult.success) {
+      console.warn('[Executor] HydraDB storage failed:', memResult.error);
       try {
         await createMemoryNode({
           user_id: internalUserId,
@@ -529,7 +527,11 @@ export async function executeTask(
           importance: 0.7,
         });
         console.log('[Executor] Memory stored in Supabase fallback');
-      } catch (supabaseError) { }
+      } catch (supabaseError) {
+        console.warn('[Executor] Supabase fallback also failed:', supabaseError);
+      }
+    } else {
+      console.log('[Executor] Memory stored in HydraDB');
     }
 
     return { 
