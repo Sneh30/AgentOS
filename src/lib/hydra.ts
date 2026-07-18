@@ -117,8 +117,8 @@ export async function storeMemory(
   try {
     await ensureDatabase();
     const response = await getClient().context.ingest({
-      tenantId: HYDRA_DATABASE,
-      subTenantId: getCollection(options?.userId),
+      database: HYDRA_DATABASE,
+      collection: getCollection(options?.userId),
       type: 'memory',
       memories: JSON.stringify([
         {
@@ -162,7 +162,7 @@ export async function recallMemories(
     const response = await getClient().query({
       database: HYDRA_DATABASE,
       collection: getCollection(options?.userId),
-      query,
+      query: query,
       type: 'memory',
       queryBy: 'hybrid',
       mode: 'fast',
@@ -187,8 +187,8 @@ export async function verifyProcessing(sourceIds: string[], userId?: string): Pr
   try {
     await ensureDatabase();
     const response = await getClient().context.status({
-      tenantId: HYDRA_DATABASE,
-      subTenantId: getCollection(userId),
+      database: HYDRA_DATABASE,
+      collection: getCollection(userId),
       ids: sourceIds,
     });
 
@@ -367,8 +367,8 @@ export async function storeKnowledge(
   try {
     await ensureDatabase();
     const response = await getClient().context.ingest({
-      tenantId: HYDRA_DATABASE,
-      subTenantId: getCollection(knowledge.userId),
+      database: HYDRA_DATABASE,
+      collection: getCollection(knowledge.userId),
       type: 'knowledge',
       appKnowledge: JSON.stringify([
         {
