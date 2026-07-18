@@ -5,16 +5,17 @@ import { testComposioConnection } from '@/lib/composio';
 
 export async function GET() {
   const checks = {
-    google: { status: 'unknown' as string, error: undefined as string | undefined },
+    llm: { status: 'unknown' as string, error: undefined as string | undefined, provider: '' as string },
     hydradb: { status: 'unknown' as string, error: undefined as string | undefined },
     supabase: { status: 'unknown' as string, error: undefined as string | undefined },
     composio: { status: 'unknown' as string, toolCount: 0, error: undefined as string | undefined },
     firecrawl: { status: 'unknown' as string, error: undefined as string | undefined },
   };
 
-  const googleResult = await testGoogleConnection();
-  checks.google.status = googleResult.success ? 'healthy' : 'unhealthy';
-  checks.google.error = googleResult.error;
+  const llmResult = await testGoogleConnection();
+  checks.llm.status = llmResult.success ? 'healthy' : 'unhealthy';
+  checks.llm.error = llmResult.error;
+  checks.llm.provider = process.env.OPENROUTER_API_KEY ? 'openrouter' : 'google';
 
   checks.hydradb.status = isHydraConfigured() ? 'healthy' : 'not_configured';
 
