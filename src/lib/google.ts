@@ -8,7 +8,10 @@ const GOOGLE_MODEL = process.env.GOOGLE_MODEL || 'gemini-flash-latest';
 const OLLAMA_API_URL = process.env.OLLAMA_API_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'gemma4:cloud';
 
-interface GoogleMessage {
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp';
+
+interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
 }
@@ -32,47 +35,59 @@ function endpointFor(model: string): string {
   return `${base}models/${model}:generateContent?key=${GOOGLE_API_KEY}`;
 }
 
-// Fallback used when Google returns 429 (rate limit) — routes the same
-// conversation through a local Ollama instance instead.
-async function callOllama(
-  messages: GoogleMessage[],
+async function callOpenRouter(
+  messages: LLMMessage[],
   opts: { temperature?: number; maxOutputTokens?: number } = {}
 ): Promise<{ content: string } | { error: string }> {
+  if (!OPENROUTER_API_KEY) {
+    return { error: 'OPENROUTER_API_KEY not configured' };
+  }
+
+  const bodyObj = {
+    model: OPENROUTER_MODEL,
+    messages: messages.map(m => ({
+      role: m.role === 'system' ? 'system' : m.role,
+      content: m.content,
+    })),
+    temperature: opts.temperature ?? 0.3,
+    max_tokens: opts.maxOutputTokens ?? 2048,
+  };
+
   try {
-    const response = await fetch(`${OLLAMA_API_URL}/api/chat`, {
+    const encoder = new TextEncoder();
+    const bodyBytes = encoder.encode(JSON.stringify(bodyObj));
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
-        stream: false,
-        options: {
-          temperature: opts.temperature ?? 0.3,
-          num_predict: opts.maxOutputTokens ?? 2048,
-        },
-      }),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
+        'X-Title': 'Anymind',
+      },
+      body: bodyBytes,
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      return { error: `Ollama API error: ${response.status} - ${errorText}` };
+      let parsed: any;
+      try { parsed = JSON.parse(errorText); } catch { parsed = null; }
+      const msg = parsed?.error?.message || `OpenRouter API error: ${response.status} - ${errorText}`;
+      return { error: msg };
     }
 
     const data = await response.json();
-    const content = data?.message?.content || '';
-
+    const content = data?.choices?.[0]?.message?.content || '';
     if (!content) {
-      return { error: 'No response from Ollama' };
+      return { error: 'No response from OpenRouter' };
     }
-
     return { content };
   } catch (error) {
-    return { error: `Ollama request failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
+    return { error: `OpenRouter request failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
   }
 }
 
 async function callGoogle(
-  messages: GoogleMessage[],
+  messages: LLMMessage[],
   opts: { temperature?: number; maxOutputTokens?: number; model?: string; thinkingBudget?: number } = {}
 ): Promise<{ content: string } | { error: string }> {
   if (!GOOGLE_API_KEY) {
@@ -96,10 +111,6 @@ async function callGoogle(
     generationConfig: {
       temperature: opts.temperature ?? 0.3,
       maxOutputTokens: opts.maxOutputTokens ?? 2048,
-      // Every call site here wants fast structured output, not extended reasoning.
-      // Without this, "thinking" models (e.g. gemini-3.5-flash) can burn the entire
-      // maxOutputTokens budget on hidden reasoning and return finishReason=MAX_TOKENS
-      // with truncated (unparseable) JSON. Callers can opt back in via opts.thinkingBudget.
       thinkingConfig: { thinkingBudget: opts.thinkingBudget ?? 0 },
     },
   };
@@ -137,6 +148,64 @@ async function callGoogle(
   }
 }
 
+async function callOllama(
+  messages: LLMMessage[],
+  opts: { temperature?: number; maxOutputTokens?: number } = {}
+): Promise<{ content: string } | { error: string }> {
+  try {
+    const response = await fetch(`${OLLAMA_API_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        stream: false,
+        options: {
+          temperature: opts.temperature ?? 0.3,
+          num_predict: opts.maxOutputTokens ?? 2048,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { error: `Ollama API error: ${response.status} - ${errorText}` };
+    }
+
+    const data = await response.json();
+    const content = data?.message?.content || '';
+
+    if (!content) {
+      return { error: 'No response from Ollama' };
+    }
+
+    return { content };
+  } catch (error) {
+    return { error: `Ollama request failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
+  }
+}
+
+export async function callLLM(
+  messages: LLMMessage[],
+  opts: { temperature?: number; maxOutputTokens?: number; model?: string; thinkingBudget?: number } = {}
+): Promise<{ content: string } | { error: string }> {
+  if (OPENROUTER_API_KEY) {
+    const result = await callOpenRouter(messages, opts);
+    if (!('error' in result)) {
+      console.log('[LLM] Used OpenRouter provider');
+      return result;
+    }
+    console.warn('[LLM] OpenRouter failed, falling back to Google:', result.error);
+  }
+
+  const result = await callGoogle(messages, opts);
+  if (!('error' in result)) {
+    console.log('[LLM] Used Google provider');
+    return result;
+  }
+  return result;
+}
+
 export interface GeneratePlanInput {
   userInput: string;
   userContext?: {
@@ -172,15 +241,27 @@ export async function generatePlan(
   executionHistory: any[] = [],
   availableTools: PlannerTool[] = []
 ): Promise<{ plan: TaskPlan; reasoning: string } | { error: string }> {
-  if (!GOOGLE_API_KEY) {
-    return { error: 'GOOGLE_API_KEY not configured' };
+  if (!GOOGLE_API_KEY && !OPENROUTER_API_KEY) {
+    return { error: 'No LLM API key configured (set GOOGLE_API_KEY or OPENROUTER_API_KEY)' };
   }
 
   const customTools = availableTools.filter((t) => !t.name.startsWith('composio_'));
+  const examples: Record<string, string> = {
+    browser_scrape: ' Example: {"url": "https://example.com"}',
+    browser_search: ' Example: {"query": "find something"}',
+    email_send: ' Example: {"to": "user@example.com", "subject": "Hello", "body": "Message text"}',
+    memory_store: ' Example: {"content": "remember this"}',
+    memory_recall: ' Example: {"query": "search term"}',
+  };
   const toolsSection = customTools.length > 0
-    ? `\n\nBuilt-in tools (call these directly by name with the input shape shown, no auth needed):\n${customTools
-        .map((t) => `- ${t.name}: ${t.description}${t.input_schema ? ` Input: ${JSON.stringify(t.input_schema)}` : ''}`)
-        .join('\n')}`
+    ? '\n\nBuilt-in tools (call these directly by name with the input shape shown, no auth needed):\n' + customTools
+        .map((t) => {
+          const schema = t.input_schema;
+          const schemaStr = schema ? ' Input: ' + JSON.stringify(schema) : '';
+          const exampleStr = examples[t.name] || '';
+          return '- ' + t.name + ': ' + t.description + schemaStr + exampleStr;
+        })
+        .join('\n')
     : '';
 
   const systemPrompt = `You are a task planning AI. Generate a JSON execution plan for the given task.
@@ -203,6 +284,8 @@ Format:
 }${toolsSection}
 
 IMPORTANT: For GitHub, Gmail, Slack, Twitter, Calendar — ALWAYS use Composio tools below. NEVER use raw HTTP requests for authenticated APIs.
+
+EMAIL: When sending email, use 'email_send' for the built-in tool or 'gmail_send_email' for Composio Gmail. Always put the REAL recipient email address in the "to" field (format: user@domain.com). If you don't know someone's email, use browser_search to find it first or ask the user.
 
 Composio Tools (Access to 250+ Apps: Gmail, GitHub, Slack, Discord, Twitter, Google Calendar, Notion, etc.):
 - Canonical Naming: Composio slugs are usually APP_ACTION (e.g., github_create_issue, gmail_send_message, gmail_get_message). Prefer lowercase.
@@ -230,7 +313,7 @@ For simple questions, or if the task is thoroughly completed based on tool histo
     ? `\n\nPREVIOUS ACTIONS TAKEN IN THIS LOOP:\n${JSON.stringify(executionHistory, null, 2)}\n\nReview the above results. If the final goal is met, provide 'answer' and [] steps. If you need more details from the IDs, provide the follow-up step.`
     : '';
 
-  const messages: GoogleMessage[] = [
+  const messages: LLMMessage[] = [
     { role: 'system', content: systemPrompt },
     {
       role: 'user',
@@ -238,27 +321,24 @@ For simple questions, or if the task is thoroughly completed based on tool histo
     },
   ];
 
-  console.log('[Google] Calling API with model', GOOGLE_MODEL);
-  const result = await callGoogle(messages, { temperature: 0.3, maxOutputTokens: 2048 });
+  console.log('[Google] Calling LLM');
+  const result = await callLLM(messages, { temperature: 0.3, maxOutputTokens: 2048 });
   if ('error' in result) {
     return { error: result.error };
   }
   const content = result.content;
 
-  // Parse the JSON response using the robust extractor
   let parsed;
   try {
     parsed = extractJSON(content);
   } catch (e) {
-    return { error: `Failed to parse Google response: ${e instanceof Error ? e.message : 'Unknown error'}. Raw: ${content.substring(0, 100)}` };
+    return { error: `Failed to parse LLM response: ${e instanceof Error ? e.message : 'Unknown error'}. Raw: ${content.substring(0, 100)}` };
   }
 
-  // Validate the plan structure - new format has top-level steps
   if (!parsed.steps || !Array.isArray(parsed.steps)) {
     return { error: `Invalid plan structure: ${JSON.stringify(parsed).substring(0, 200)}` };
   }
 
-  // Ensure all required fields are present
   const validatedSteps: PlanStep[] = parsed.steps.map((step: PlanStep, index: number) => {
     const stepAny = step as unknown as Record<string, unknown>;
     return {
@@ -294,8 +374,8 @@ export interface AnalyzeIntentOutput {
 export async function analyzeIntent(
   input: AnalyzeInputInput
 ): Promise<AnalyzeIntentOutput | GoogleError> {
-  if (!GOOGLE_API_KEY) {
-    return { error: 'GOOGLE_API_KEY not configured' };
+  if (!GOOGLE_API_KEY && !OPENROUTER_API_KEY) {
+    return { error: 'No LLM API key configured' };
   }
 
   const systemPrompt = `Analyze user input and determine their intent. Output JSON:
@@ -313,7 +393,7 @@ Intents:
 - composio_tool: User wants to use an external service (Gmail, GitHub, Slack, Twitter, Google Calendar, etc.)
 - unknown: Cannot determine intent`;
 
-  const result = await callGoogle(
+  const result = await callLLM(
     [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: input.userInput },
@@ -339,7 +419,7 @@ export async function generateSynthesizedResponse(
   context: string,
   userFacts: string = ''
 ): Promise<string> {
-  if (!GOOGLE_API_KEY) return 'Synthesis failed: API key missing';
+  if (!GOOGLE_API_KEY && !OPENROUTER_API_KEY) return 'Synthesis failed: no LLM configured';
 
   const systemPrompt = `You are a high-quality, friendly AI agent (Anymind).
 Your goal is to answer the user's question using the provided context and facts.
@@ -352,7 +432,7 @@ RULES:
 5. Be concise but warm, like a premium digital assistant.
 6. Use professional markdown formatting if needed for lists, but keep it minimal.`;
 
-  const messages: GoogleMessage[] = [
+  const messages: LLMMessage[] = [
     { role: 'system', content: systemPrompt },
     {
       role: 'user',
@@ -361,14 +441,14 @@ RULES:
   ];
 
   try {
-    const result = await callGoogle(messages, { temperature: 0.3, maxOutputTokens: 1024 });
+    const result = await callLLM(messages, { temperature: 0.3, maxOutputTokens: 1024 });
     if ('error' in result) {
-      console.error('[Google Synthesis] Error:', result.error);
+      console.error('[LLM Synthesis] Error:', result.error);
       return 'I found some information but had trouble summarizing it.';
     }
     return result.content || "I'm not sure, I'll need more context.";
   } catch (error) {
-    console.error('[Google Synthesis] Error:', error);
+    console.error('[LLM Synthesis] Error:', error);
     return 'I encountered an error trying to remember that.';
   }
 }
@@ -383,19 +463,15 @@ export interface AgentDefinitionPlan {
   suggestedSchedule?: string;
 }
 
-// Turns a plain-English ask ("find LinkedIn posts mentioning our product") into a
-// declarative gtm_agents row: goal template, required toolkits, input schema, suggested
-// trigger. No code is generated — only a JSON config the executor already knows how to run.
 export async function generateAgentDefinition(
   description: string,
   allowedToolkits: string[]
 ): Promise<{ plan: AgentDefinitionPlan } | { error: string }> {
-  if (!GOOGLE_API_KEY) {
-    return { error: 'GOOGLE_API_KEY not configured' };
+  if (!GOOGLE_API_KEY && !OPENROUTER_API_KEY) {
+    return { error: 'No LLM API key configured' };
   }
 
   const systemPrompt = `You design reusable GTM agent definitions for a GTM automation platform. Given a plain-language description of a workflow, design a declarative agent — NOT code.
-
 Return ONLY valid JSON, no markdown fences, no explanation:
 {
   "name": "Short Title Case Name",
@@ -412,7 +488,7 @@ ${allowedToolkits.join(', ')}
 
 Keep the agent narrowly scoped to exactly what was asked. Prefer "manual" trigger unless the description implies recurring monitoring (e.g. "daily", "watch for", "alert me when").`;
 
-  const result = await callGoogle(
+  const result = await callLLM(
     [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `Design a GTM agent for this workflow:\n\n"${description}"` },
@@ -436,12 +512,23 @@ Keep the agent narrowly scoped to exactly what was asked. Prefer "manual" trigge
 }
 
 export async function testGoogleConnection(): Promise<{ success: boolean; error?: string }> {
+  if (OPENROUTER_API_KEY) {
+    const result = await callOpenRouter(
+      [{ role: 'user', content: 'Say OK if you can hear me.' }],
+      { maxOutputTokens: 10 }
+    );
+    if (!('error' in result)) {
+      return { success: true };
+    }
+    return { success: false, error: `OpenRouter: ${result.error}` };
+  }
+
   if (!GOOGLE_API_KEY) {
-    return { success: false, error: 'GOOGLE_API_KEY not configured' };
+    return { success: false, error: 'No LLM API key configured' };
   }
 
   const result = await callGoogle(
-    [{ role: 'user', content: 'Say "OK" if you can hear me.' }],
+    [{ role: 'user', content: 'Say OK if you can hear me.' }],
     { maxOutputTokens: 10 }
   );
 
